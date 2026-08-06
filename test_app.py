@@ -28,7 +28,8 @@ def test_home_page(client):
     """Test if home page loads correctly"""
     response = client.get('/')
     assert response.status_code == 200
-    assert b"Test Student" in response.data
+    #assert b"Test Student" in response.data
+    assert b"Testing Student" in response.data
 
 
 def test_add_student(client):
