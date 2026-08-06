@@ -1,0 +1,261 @@
+name: Flask CI/CD Pipeline
+on:
+  push:
+    branches:
+      - main
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  IMAGE_TAG: ${{ github.sha }}
+  MONGO_URI: ${{ secrets.MONGO_URI }}
+  EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+  IMAGE_URI: '${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}'
+
+jobs:
+  # Checkout the repository
+  Checkout-Install-Test:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+          
+      # Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      # Install Dependencies       
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Run Unit Tests
+      - name: Run Unit Tests
+        run: |
+          pytest
+
+  # Build a Docker image tagged with the commit SHA
+  Build:
+    needs:  Checkout-Install-Test
+    runs-on: ubuntu-latest           
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7   
+
+      # Configure AWS Credentials     
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Build Docker Image
+      - name: Build Docker Image
+        run: |
+          docker build -t $IMAGE_URI .
+
+  #Authenticate and push the tagged image.
+  Push-to-ECR:
+    needs: Build
+    runs-on: ubuntu-latest           
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      # Configure AWS Credentials 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Build Docker Image
+      - name: Build Docker Image
+        run: |
+          docker build -t $IMAGE_URI .
+
+        # Push Docker Image to Amazon ECR
+      - name: Push Docker Image to Amazon ECR
+        run: |
+          docker push $IMAGE_URI
+
+  # Deploy the Docker image to the EC2 instance using AWS Systems Manager         
+  Deploy-to-EC2:
+    needs: Push-to-ECR
+    runs-on: ubuntu-latest 
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+         # Configure AWS Credentials 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Deploy Using AWS Systems Manager
+      - name: Deploy to EC2 using SSM
+        run: |
+          cat > commands.json <<EOF
+          {
+            "commands": [
+              "aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com",
+              "docker pull $IMAGE_URI",
+              "docker stop flask-app || true",
+              "docker rm flask-app || true",
+              "docker run -d --name flask-app --restart unless-stopped -p 5000:5000 -e MONGO_URI='${{ secrets.MONGO_URI }}' -e SECRET_KEY='${{ secrets.SECRET_KEY }}' ${IMAGE_URI}"
+            ]
+          }
+          EOF
+
+          cat commands.json
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file://commands.json \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "Command ID: $COMMAND_ID"
+
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ secrets.EC2_INSTANCE_ID }}"
+
+  Verify-Deployment:
+    needs: Deploy-to-EC2
+    runs-on: ubuntu-latest 
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+       # Configure AWS Credentials 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Verify Deployment
+      - name: Verify Deployment
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+          --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+          --document-name "AWS-RunShellScript" \
+          --parameters commands='[
+            "sleep 15",
+            "curl -f http://localhost:5000/health"
+          ]' \
+          --query "Command.CommandId" \
+          --output text)
+
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ secrets.EC2_INSTANCE_ID }}"
+
+  Notify-Deployment:
+    needs: Verify-Deployment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read        
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      # Configure AWS Credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Email Notify Deployment Status
+      - name: Send Success Email
+        if: success()
+        uses: dawidd6/action-send-mail@v6
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: |
+            ✅ SUCCESS - Student Registration Application Deployed
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            CI/CD Pipeline completed successfully.
+
+            Repository:
+            ${{ github.repository }}
+
+            Branch:
+            ${{ github.ref_name }}
+
+            Commit SHA:
+            ${{ github.sha }}
+
+            Docker Image:
+            ${{ env.IMAGE_URI }}
+
+            EC2 Instance:
+            ${{ secrets.EC2_INSTANCE_ID }}
+
+            Workflow Run:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Deployment Status:
+            SUCCESS
+
+            Health Check:
+            PASSED
+        
+      # Email Notify Deployment Failure
+      - name: Send Failure Email
+        if: failure()
+        uses: dawidd6/action-send-mail@v6
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: |
+            ❌ FAILURE - Student Registration Application Deployment Failed
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            CI/CD Pipeline FAILED.
+
+            Repository:
+            ${{ github.repository }}
+
+            Branch:
+            ${{ github.ref_name }}
+
+            Commit SHA:
+            ${{ github.sha }}
+
+            Failed Job:
+            ${{ github.job }}
+
+            EC2 Instance:
+            ${{ secrets.EC2_INSTANCE_ID }}
+
+            Workflow Run:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Please check the workflow logs for detailed error information.              
