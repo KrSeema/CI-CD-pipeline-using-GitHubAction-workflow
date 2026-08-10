@@ -117,7 +117,7 @@ jobs:
         # Push Docker Image to Amazon ECR
       - name: Push Docker Image to Amazon ECR
         run: |
-          docker push ${{ IMAGE_URI }}
+          docker push ${{ env.IMAGE_URI }}
 
   # Deploy the Docker image to the EC2 instance using AWS Systems Manager         
   Deploy-to-EC2:
