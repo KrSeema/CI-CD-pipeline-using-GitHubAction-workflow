@@ -86,7 +86,7 @@ jobs:
       # Build Docker Image
       - name: Build Docker Image
         run: |
-          docker build -t ${{ IMAGE_URI }} .
+          docker build -t ${{ env.IMAGE_URI }} .
 
   #Authenticate and push the tagged image.
   Push-to-ECR:
@@ -112,7 +112,7 @@ jobs:
       # Build Docker Image
       - name: Build Docker Image
         run: |
-          docker build -t ${{ IMAGE_URI }} .
+          docker build -t ${{ env.IMAGE_URI }} .
 
         # Push Docker Image to Amazon ECR
       - name: Push Docker Image to Amazon ECR
