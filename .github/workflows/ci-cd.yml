@@ -156,7 +156,7 @@ jobs:
               \"docker run -d --name flask-app --restart unless-stopped -p 5000:5000 -e MONGO_URI='$MONGO_URI' -e SECRET_KEY='$SECRET_KEY' $IMAGE_URI\",
               \"sleep 10\",
               \"if ! docker ps --format '{{.Names}}' | grep -q '^flask-app$'; then echo 'Container is not running'; docker logs flask-app || true; exit 1; fi\",
-              \"curl --fail --silent --show-error --max-time 10 http://localhost:5000/health\"
+              \"curl --fail --silent --show-error --max-time 10 http://localhost:5000/health/invalid\"
             ]" \
             --query "Command.CommandId" \
             --output text)
@@ -170,7 +170,7 @@ jobs:
             --instance-id "${{ secrets.EC2_INSTANCE_ID }}"
 
           echo "Deployment and health check succeeded."
-
+  # Verify the deployment by checking the health endpoint of the Flask application
   Verify-Deployment:
     needs: Deploy-to-EC2
     runs-on: ubuntu-latest 
